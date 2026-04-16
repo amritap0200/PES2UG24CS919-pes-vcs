@@ -97,4 +97,42 @@ int index_save(const Index *index) {
     return 0;
 }
 
-int index_add(Index *index, const char *path) { (void)index; (void)path; return -1; }
+int index_add(Index *index, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    void *data = malloc(fsize);
+    if (!data) { fclose(f); return -1; }
+
+    if (fread(data, 1, fsize, f) != (unsigned long)fsize) {
+        free(data); fclose(f); return -1;
+    }
+    fclose(f);
+
+    ObjectID blob_id;
+    int rc = object_write(OBJ_BLOB, data, (size_t)fsize, &blob_id);
+    free(data);
+    if (rc != 0) return -1;
+
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+
+    IndexEntry *entry = index_find(index, path);
+    if (!entry) {
+        if (index->count >= MAX_INDEX_ENTRIES) return -1;
+        entry = &index->entries[index->count];
+        index->count++;
+        snprintf(entry->path, sizeof(entry->path), "%s", path);
+    }
+
+    entry->mode = 100644;
+    entry->hash = blob_id;
+    entry->mtime_sec = (uint64_t)st.st_mtime;
+    entry->size = (uint32_t)st.st_size;
+
+    return index_save(index);
+}

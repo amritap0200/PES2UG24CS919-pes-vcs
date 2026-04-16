@@ -193,6 +193,38 @@ int head_update(const ObjectID *new_commit) {
 //
 // Returns 0 on success, -1 on error.
 int commit_create(const char *message, ObjectID *commit_id_out) {
-    (void)message; (void)commit_id_out;
-    return -1;
+    // Build tree from staged index
+    ObjectID tree_id;
+    if (tree_from_index(&tree_id) != 0) return -1;
+
+    // Try to read parent (may not exist for first commit)
+    ObjectID parent_id;
+    int has_parent = (head_read(&parent_id) == 0) ? 1 : 0;
+
+    // Fill commit struct
+    Commit commit = {0};
+    commit.tree = tree_id;
+    commit.has_parent = has_parent;
+    if (has_parent) commit.parent = parent_id;
+
+    snprintf(commit.author, sizeof(commit.author), "%s", pes_author());
+    commit.timestamp = (uint64_t)time(NULL);
+    snprintf(commit.message, sizeof(commit.message), "%s", message);
+
+    // Serialize and write
+    void *data;
+    size_t len;
+    if (commit_serialize(&commit, &data, &len) != 0) return -1;
+
+    ObjectID commit_id;
+    if (object_write(OBJ_COMMIT, data, len, &commit_id) != 0) {
+        free(data); return -1;
+    }
+    free(data);
+
+    // Update HEAD to point to new commit
+    if (head_update(&commit_id) != 0) return -1;
+
+    *commit_id_out = commit_id;
+    return 0;
 }

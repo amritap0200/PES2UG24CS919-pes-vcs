@@ -59,11 +59,9 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
         default: return -1;
     }
 
-    // Build header: "blob 16\0"
     char header[256];
     int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len);
 
-    // Build full object = header + null byte + data
     size_t full_len = header_len + 1 + len;
     void *full_obj = malloc(full_len);
     if (!full_obj) return -1;
@@ -71,20 +69,52 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     ((char*)full_obj)[header_len] = '\0';
     memcpy((char*)full_obj + header_len + 1, data, len);
 
-    // Compute SHA-256 of full object
     ObjectID id;
     compute_hash(full_obj, full_len, &id);
 
-    // Deduplication: if object already exists, we're done
     if (object_exists(&id)) {
         free(full_obj);
         *id_out = id;
         return 0;
     }
 
-    // TODO: write to disk (next commit)
+    // Create shard directory .pes/objects/XX/
+    char shard_dir[512];
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(&id, hex);
+    snprintf(shard_dir, sizeof(shard_dir), "%s/%.2s", OBJECTS_DIR, hex);
+    mkdir(shard_dir, 0755);
+
+    // Write to temp file, then rename atomically
+    char temp_path[512];
+    snprintf(temp_path, sizeof(temp_path), "%s/.tmp", shard_dir);
+
+    int fd = open(temp_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) { free(full_obj); return -1; }
+
+    if (write(fd, full_obj, full_len) != (ssize_t)full_len) {
+        close(fd); unlink(temp_path); free(full_obj); return -1;
+    }
+
+    if (fsync(fd) != 0) {
+        close(fd); unlink(temp_path); free(full_obj); return -1;
+    }
+    close(fd);
+
+    char final_path[512];
+    object_path(&id, final_path, sizeof(final_path));
+
+    if (rename(temp_path, final_path) != 0) {
+        unlink(temp_path); free(full_obj); return -1;
+    }
+
+    // Sync directory to persist the rename
+    int dir_fd = open(shard_dir, O_RDONLY);
+    if (dir_fd >= 0) { fsync(dir_fd); close(dir_fd); }
+
     free(full_obj);
-    return -1;
+    *id_out = id;
+    return 0;
 }
 
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {

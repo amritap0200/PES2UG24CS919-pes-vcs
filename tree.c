@@ -10,16 +10,11 @@
 //   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
 
 #include "tree.h"
-#include "index.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
-
-// Forward declarations
-int index_load(Index *index);
-int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
 
 // ─── Mode Constants ─────────────────────────────────────────────────────────
 
@@ -119,114 +114,6 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
     return 0;
 }
 
-// Helper function to recursively build tree objects from index entries
-// at a given directory depth, optionally filtered by a prefix.
-static int write_tree_level(IndexEntry *entries, int count, int depth, const char *prefix, ObjectID *id_out) {
-    Tree tree = {0};
-    
-    // Find all unique components at the current depth level
-    for (int i = 0; i < count; i++) {
-        IndexEntry *entry = &entries[i];
-        const char *path = entry->path;
-        
-        // Skip if path doesn't match prefix
-        if (prefix && strncmp(path, prefix, strlen(prefix)) != 0) {
-            continue;
-        }
-        
-        // Adjust path to be relative to prefix
-        if (prefix) {
-            path = path + strlen(prefix);
-        }
-        
-        // Count slashes to determine how deep this entry is
-        int slashes = 0;
-        for (const char *p = path; *p; p++) {
-            if (*p == '/') slashes++;
-        }
-        
-        // Skip entries that are shallower than our current depth
-        if (slashes < depth) continue;
-        
-        // Get the component at our current depth
-        int slash_count = 0;
-        const char *current = path;
-        while (slash_count < depth && *current) {
-            if (*current == '/') slash_count++;
-            current++;
-        }
-        
-        // Find the next slash (if any)
-        const char *next_slash = strchr(current, '/');
-        
-        // Extract the name at this level
-        char component_name[256] = {0};
-        if (next_slash) {
-            // This is a directory
-            int len = next_slash - current;
-            snprintf(component_name, sizeof(component_name), "%.*s", len, current);
-        } else {
-            // This is a file
-            snprintf(component_name, sizeof(component_name), "%s", current);
-        }
-        
-        // Check if we already have this component
-        int found = 0;
-        for (int j = 0; j < tree.count; j++) {
-            if (strcmp(tree.entries[j].name, component_name) == 0) {
-                found = 1;
-                break;
-            }
-        }
-        
-        if (!found && tree.count < MAX_TREE_ENTRIES) {
-            TreeEntry *tentry = &tree.entries[tree.count];
-            snprintf(tentry->name, sizeof(tentry->name), "%s", component_name);
-            
-            if (next_slash) {
-                // It's a directory - we'll process it below
-                tentry->mode = MODE_DIR;
-            } else {
-                // It's a file - use the entry's hash and mode
-                tentry->mode = entry->mode;
-                tentry->hash = entry->hash;
-            }
-            tree.count++;
-        }
-    }
-    
-    // Now process any subdirectories by recursing
-    for (int i = 0; i < tree.count; i++) {
-        if (tree.entries[i].mode == MODE_DIR) {
-            // Build the prefix for recursion
-            char new_prefix[512] = {0};
-            if (prefix) {
-                snprintf(new_prefix, sizeof(new_prefix), "%s%s/", prefix, tree.entries[i].name);
-            } else {
-                snprintf(new_prefix, sizeof(new_prefix), "%s/", tree.entries[i].name);
-            }
-            
-            // Recursively build tree for this directory
-            if (write_tree_level(entries, count, 0, new_prefix, &tree.entries[i].hash) != 0) {
-                return -1;
-            }
-        }
-    }
-    
-    // Serialize and write tree object
-    void *data;
-    size_t len;
-    if (tree_serialize(&tree, &data, &len) != 0) return -1;
-    
-    if (object_write(OBJ_TREE, data, len, id_out) != 0) {
-        free(data);
-        return -1;
-    }
-    free(data);
-    
-    return 0;
-}
-
 // ─── TODO: Implement these ──────────────────────────────────────────────────
 
 // Build a tree hierarchy from the current index and write all tree
@@ -241,10 +128,71 @@ static int write_tree_level(IndexEntry *entries, int count, int depth, const cha
 //   - tree_serialize  : convert your populated Tree struct into a binary buffer
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
+int compare_entry(const void *a, const void *b) {
+    const TreeEntry *ea = a;
+    const TreeEntry *eb = b;
+    return strcmp(ea->name, eb->name);
+}
+
 // Returns 0 on success, -1 on error.
+int build_tree(const Index *index, const char *prefix, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
+
+    for (int i = 0; i < index->count; i++) {
+        const IndexEntry *entry = &index->entries[i];
+        const char *path = entry->path;
+        if (prefix[0] && strncmp(path, prefix, strlen(prefix)) != 0) continue;
+        if (prefix[0] && path[strlen(prefix)] != '/') continue;
+        const char *rel_path = path + strlen(prefix);
+        if (rel_path[0] == '/') rel_path++;
+        char *slash = strchr(rel_path, '/');
+        if (slash) {
+            // subdir
+            char subdir[256];
+            int len = slash - rel_path;
+            memcpy(subdir, rel_path, len);
+            subdir[len] = '\0';
+            // check if already added
+            int found = 0;
+            for (int j = 0; j < tree.count; j++) {
+                if (strcmp(tree.entries[j].name, subdir) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                TreeEntry *e = &tree.entries[tree.count++];
+                e->mode = MODE_DIR;
+                char sub_prefix[512];
+                if (prefix[0]) sprintf(sub_prefix, "%s/%s", prefix, subdir);
+                else sprintf(sub_prefix, "%s", subdir);
+                if (build_tree(index, sub_prefix, &e->hash) != 0) return -1;
+                strcpy(e->name, subdir);
+            }
+        } else {
+            // file
+            TreeEntry *e = &tree.entries[tree.count++];
+            e->mode = entry->mode;
+            e->hash = entry->hash;
+            strcpy(e->name, rel_path);
+        }
+    }
+
+    // sort
+    qsort(tree.entries, tree.count, sizeof(TreeEntry), compare_entry);
+
+    // serialize and write
+    void *data;
+    size_t len;
+    if (tree_serialize(&tree, &data, &len) != 0) return -1;
+    int ret = object_write(OBJ_TREE, data, len, id_out);
+    free(data);
+    return ret;
+}
+
 int tree_from_index(ObjectID *id_out) {
     Index index;
     if (index_load(&index) != 0) return -1;
-    
-    return write_tree_level(index.entries, index.count, 0, NULL, id_out);
+    return build_tree(&index, "", id_out);
 }

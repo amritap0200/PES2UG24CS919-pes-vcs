@@ -59,5 +59,42 @@ int index_load(Index *index) {
     return 0;
 }
 
-int index_save(const Index *index) { (void)index; return -1; }
+static int compare_entries(const void *a, const void *b) {
+    return strcmp(((IndexEntry*)a)->path, ((IndexEntry*)b)->path);
+}
+
+int index_save(const Index *index) {
+    IndexEntry *sorted_entries = malloc(index->count * sizeof(IndexEntry));
+    if (!sorted_entries) return -1;
+    memcpy(sorted_entries, index->entries, index->count * sizeof(IndexEntry));
+    qsort(sorted_entries, index->count, sizeof(IndexEntry), compare_entries);
+
+    char tmp_path[512];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", INDEX_FILE);
+
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) { free(sorted_entries); return -1; }
+
+    char hex[HASH_HEX_SIZE + 1];
+    for (int i = 0; i < index->count; i++) {
+        hash_to_hex(&sorted_entries[i].hash, hex);
+        if (fprintf(f, "%u %s %llu %u %s\n",
+                    sorted_entries[i].mode,
+                    hex,
+                    sorted_entries[i].mtime_sec,
+                    sorted_entries[i].size,
+                    sorted_entries[i].path) < 0) {
+            fclose(f); unlink(tmp_path); free(sorted_entries); return -1;
+        }
+    }
+
+    if (fflush(f) != 0) { fclose(f); unlink(tmp_path); free(sorted_entries); return -1; }
+    if (fsync(fileno(f)) != 0) { fclose(f); unlink(tmp_path); free(sorted_entries); return -1; }
+    fclose(f);
+
+    if (rename(tmp_path, INDEX_FILE) != 0) { free(sorted_entries); return -1; }
+    free(sorted_entries);
+    return 0;
+}
+
 int index_add(Index *index, const char *path) { (void)index; (void)path; return -1; }

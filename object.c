@@ -118,6 +118,63 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 }
 
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (fsize <= 0) { fclose(f); return -1; }
+
+    void *file_data = malloc(fsize);
+    if (!file_data) { fclose(f); return -1; }
+
+    if (fread(file_data, 1, fsize, f) != (size_t)fsize) {
+        free(file_data); fclose(f); return -1;
+    }
+    fclose(f);
+
+    // Find null byte separating header from data
+    void *null_pos = memchr(file_data, '\0', fsize);
+    if (!null_pos) { free(file_data); return -1; }
+
+    size_t header_len = (char*)null_pos - (char*)file_data;
+    char header[256];
+    if (header_len >= sizeof(header)) { free(file_data); return -1; }
+    memcpy(header, file_data, header_len);
+    header[header_len] = '\0';
+
+    char type_str[32];
+    size_t stored_size;
+    if (sscanf(header, "%31s %zu", type_str, &stored_size) != 2) {
+        free(file_data); return -1;
+    }
+
+    size_t actual_data_len = fsize - header_len - 1;
+    if (actual_data_len != stored_size) { free(file_data); return -1; }
+
+    // Integrity check: recompute hash and compare to filename
+    ObjectID computed_id;
+    compute_hash(file_data, fsize, &computed_id);
+    if (memcmp(computed_id.hash, id->hash, HASH_SIZE) != 0) {
+        free(file_data); return -1;
+    }
+
+    if (strncmp(type_str, "blob", 4) == 0)        *type_out = OBJ_BLOB;
+    else if (strncmp(type_str, "tree", 4) == 0)   *type_out = OBJ_TREE;
+    else if (strncmp(type_str, "commit", 6) == 0) *type_out = OBJ_COMMIT;
+    else { free(file_data); return -1; }
+
+    void *data = malloc(actual_data_len);
+    if (!data) { free(file_data); return -1; }
+    memcpy(data, (char*)file_data + header_len + 1, actual_data_len);
+    free(file_data);
+
+    *data_out = data;
+    *len_out = actual_data_len;
+    return 0;
 }

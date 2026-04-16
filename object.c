@@ -51,7 +51,39 @@ int object_exists(const ObjectID *id) {
 
 // object_write and object_read — TODO
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    (void)type; (void)data; (void)len; (void)id_out;
+    const char *type_str;
+    switch (type) {
+        case OBJ_BLOB:   type_str = "blob";   break;
+        case OBJ_TREE:   type_str = "tree";   break;
+        case OBJ_COMMIT: type_str = "commit"; break;
+        default: return -1;
+    }
+
+    // Build header: "blob 16\0"
+    char header[256];
+    int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len);
+
+    // Build full object = header + null byte + data
+    size_t full_len = header_len + 1 + len;
+    void *full_obj = malloc(full_len);
+    if (!full_obj) return -1;
+    memcpy(full_obj, header, header_len);
+    ((char*)full_obj)[header_len] = '\0';
+    memcpy((char*)full_obj + header_len + 1, data, len);
+
+    // Compute SHA-256 of full object
+    ObjectID id;
+    compute_hash(full_obj, full_len, &id);
+
+    // Deduplication: if object already exists, we're done
+    if (object_exists(&id)) {
+        free(full_obj);
+        *id_out = id;
+        return 0;
+    }
+
+    // TODO: write to disk (next commit)
+    free(full_obj);
     return -1;
 }
 
